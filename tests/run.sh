@@ -116,7 +116,32 @@ LC_ALL=C awk -v a="$(duration "$d/느리게 0.8x/베이스 없음.flac")" 'BEGIN
 for f in "$d"/*.flac "$d"/느리게*/*.flac; do
   p=$(astat "$f" Peak_level); below "$p" -0.05 || fail "$(basename "$f") peaks at $p dB"
 done
-ok "--stem bass,drums --slow 0.8 --ko: all files, 5 s slow copy, no peaks above -0.1 dB"
+ok "--stem bass,drums --slow 0.8 --ko: all files, 5 s slow copy, every peak below full scale"
+
+# 8b. Changing --shifts separates again; guitar goes through the 6-stem model.
+before=$(calls); run "$TMP/multi.wav" --shifts 1 > /dev/null
+[[ $(calls) == $((before + 1)) ]] || fail "--shifts change did not separate again"
+before=$(calls); run "$TMP/multi.wav" --stem guitar > /dev/null
+[[ $(calls) == $((before + 1)) && -f "$d/no guitar.flac" && -f "$d/.stems/htdemucs_6s/piano.wav" ]] \
+  || fail "6-stem path"
+grep -q "htdemucs_6s" "$FAKE_DEMUCS_LOG" || fail "guitar did not use htdemucs_6s"
+ok "settings change separates again; --stem guitar uses the 6-stem model"
+
+# 8c. A stem that is cut even at half level gets a warning.
+log=$(FAKE_BASS='1.2*sin(2*PI*110*t)' run "$TMP/multi.wav" --name hot-stem 2>&1)   # the fake clamps it at 1
+grep -q "warning: the bass stem hit full scale" <<< "$log" || fail "no warning for a clamped stem"
+ok "a stem clamped at half level is reported"
+
+# 8d. --fresh won't delete a song that sits inside the output folder; a held lock is respected.
+mkdir -p "$OUT/inside"; cp "$TMP/multi.wav" "$OUT/inside/song.wav"
+if run "$OUT/inside/song.wav" --name inside --fresh > /dev/null 2>&1; then fail "--fresh ran with the song inside"; fi
+[[ -f "$OUT/inside/song.wav" ]] || fail "--fresh deleted the input"
+mkdir -p "$OUT/multi/.stems/.lock"
+if run "$TMP/multi.wav" > /dev/null 2>&1; then fail "ran while the folder was locked"; fi
+rmdir "$OUT/multi/.stems/.lock"
+run "$TMP/multi.wav" > /dev/null
+[[ ! -e "$OUT/multi/.stems/.lock" ]] || fail "lock left behind"
+ok "--fresh keeps an input inside the output folder; a locked folder is refused"
 
 # 9. Silence goes through without a gain change.
 synth "$TMP/silent.wav" '0'

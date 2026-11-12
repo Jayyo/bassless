@@ -88,8 +88,11 @@ OUT="$ROOT/$NAME"; WORK="$OUT/.stems"; REF="$WORK/reference.wav"; ID_FILE="$WORK
 
 # ---- the output folder must belong to this song ---------------------------------
 ID=$(sha256sum -- "$SRC" | cut -d' ' -f1)
+LOCK="$WORK/.lock"
+[[ ! -d "$LOCK" ]] || die "another bassless run is using $OUT (if none is, remove $LOCK)"
 if [[ -e "$OUT" ]]; then
   if (( FRESH )); then
+    [[ "$(realpath -- "$SRC")" != "$(realpath -m -- "$OUT")"/* ]] || die "the song is inside $OUT; --fresh would delete it"
     rm -rf -- "$OUT"
   elif [[ -f "$ID_FILE" ]]; then
     [[ "$(cat "$ID_FILE")" == "$ID" ]] || die "$OUT was made from a different file (use --name, or --fresh to replace it)"
@@ -98,6 +101,8 @@ if [[ -e "$OUT" ]]; then
   fi
 fi
 mkdir -p "$WORK"
+mkdir "$LOCK" 2>/dev/null || die "another bassless run is using $OUT (if none is, remove $LOCK)"
+trap 'rmdir -- "$LOCK" 2>/dev/null || true' EXIT
 echo "$ID" > "$ID_FILE"
 
 # Files are written next to their final name and renamed when complete, so an
@@ -113,18 +118,32 @@ if [[ ! -f "$REF" ]]; then
   layout=(-ac 2)
   [[ "$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of csv=p=0 "$OUT/$ORIG.flac")" == 1 ]] \
     && layout=(-af "pan=stereo|c0=c0|c1=c0")
-  ffmpeg -loglevel error -y -i "$OUT/$ORIG.flac" -ar 44100 "${layout[@]}" -c:a pcm_s16le -f wav "$REF.part"
+  # Float, so resampling a near-full-scale master can't clip it here.
+  ffmpeg -loglevel error -y -i "$OUT/$ORIG.flac" -ar 44100 "${layout[@]}" -c:a pcm_f32le -f wav "$REF.part"
   mv -f "$REF.part" "$REF"
 fi
 # Demucs is handed the song 6 dB down. Its float32 writer clamps to +-1 whatever
 # --clip-mode says, and stems of a loud master go past that (drums at 1.13 on one
-# song). Demucs normalises its input level, so the stems come back at exactly half
-# scale (checked: within -75 dB) and are doubled when used.
+# song). Demucs normalises its input level, so the stems come back at half scale
+# (within about -75 dB of a full-level run on the song I checked) and are doubled.
+# A stem that would peak above 2 in the song is still cut; that gets a warning.
 HALF="$WORK/demucs-input.wav"
 if [[ ! -f "$HALF" ]]; then
   ffmpeg -loglevel error -y -i "$REF" -af "volume=0.5" -c:a pcm_f32le -f wav "$HALF.part"
   mv -f "$HALF.part" "$HALF"
 fi
+
+peak_db() {  # peak_db <file>: peak in dB, measured in float
+  local out v
+  out=$(ffmpeg -hide_banner -nostats -i "$1" \
+    -af "aformat=sample_fmts=flt,astats=measure_perchannel=none:measure_overall=Peak_level" -f null - 2>&1) \
+    || die "ffmpeg failed while measuring a peak"
+  v=$(sed -n 's/.*Peak level dB: \([^ ]*\).*/\1/p' <<< "$out" | tail -n 1)
+  if [[ "$v" == "-inf" ]]; then echo "-inf"
+  elif [[ "$v" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then echo "$v"
+  else die "could not read the peak level from ffmpeg ('$v')"
+  fi
+}
 
 # ---- separate (once per model; reused while the stems and settings match) -------
 declare -A NEED=()
@@ -150,23 +169,15 @@ for m in "${!NEED[@]}"; do
   fi
   for st in $(stems_of "$m"); do
     [[ -f "$tmp/$m/$st.wav" ]] || { rm -rf -- "$tmp"; die "Demucs finished but wrote no $st.wav"; }
+    p=$(peak_db "$tmp/$m/$st.wav")
+    [[ "$p" == "-inf" ]] || ! LC_ALL=C awk -v p="$p" 'BEGIN { exit !(p >= -0.001) }' \
+      || echo "    warning: the $st stem hit full scale even at half level, so parts of it may be clipped"
   done
   echo "$settings" > "$tmp/$m/settings"
   rm -rf -- "${WORK:?}/$m"; mv "$tmp/$m" "$WORK/$m"; rm -rf -- "$tmp"
 done
 
 # ---- write the tracks ---------------------------------------------------------------
-peak_db() {  # peak_db <file>: peak in dB, measured in float
-  local out v
-  out=$(ffmpeg -hide_banner -nostats -i "$1" \
-    -af "aformat=sample_fmts=flt,astats=measure_perchannel=none:measure_overall=Peak_level" -f null - 2>&1) \
-    || die "ffmpeg failed while measuring a peak"
-  v=$(sed -n 's/.*Peak level dB: \([^ ]*\).*/\1/p' <<< "$out" | tail -n 1)
-  if [[ "$v" == "-inf" ]]; then echo "-inf"
-  elif [[ "$v" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then echo "$v"
-  else die "could not read the peak level from ffmpeg ('$v')"
-  fi
-}
 encode() {  # encode <out.flac> <filtergraph> <inputs...>: turned down only if it would clip
   local out=$1 graph=$2 peak gain args=() f tmp; shift 2
   for f in "$@"; do args+=(-i "$f"); done
