@@ -28,15 +28,19 @@ below() { LC_ALL=C awk -v a="$1" -v b="$2" 'BEGIN { exit !(a == "-inf" || a < b)
 calls() { wc -l < "$FAKE_DEMUCS_LOG" | tr -d ' '; }
 duration() { ffprobe -v error -show_entries format=duration -of csv=p=0 "$1"; }
 run() { ./bassless --out "$OUT" "$@"; }
+# bassless hands Demucs the song 6 dB down, so a fake bass of 0.15 here is 0.3 in the song.
 
 # 1. The no-bass track is the original minus the stem: 55 Hz + 1 kHz minus the 55 Hz part.
 synth "$TMP/exact.wav" '0.3*sin(2*PI*55*t)+0.3*sin(2*PI*1000*t)'
 synth "$TMP/expected.wav" '0.3*sin(2*PI*1000*t)'
-FAKE_BASS='0.3*sin(2*PI*55*t)' run "$TMP/exact.wav" > /dev/null
+synth "$TMP/expected-bass.wav" '0.3*sin(2*PI*55*t)'
+FAKE_BASS='0.15*sin(2*PI*55*t)' run "$TMP/exact.wav" > /dev/null
 r=$(residual "$OUT/exact/no bass.flac" "$TMP/expected.wav")
 below "$r" -80 || fail "residual $r dBFS"
+rb=$(residual "$OUT/exact/bass only.flac" "$TMP/expected-bass.wav")
+below "$rb" -80 || fail "bass-only track is not the stem at the song's level (residual $rb dBFS)"
 [[ $(calls) == 1 ]] || fail "expected one separation, got $(calls)"
-ok "subtraction leaves the 1 kHz tone (residual $r dBFS)"
+ok "subtraction leaves the 1 kHz tone (residual $r dBFS), bass only is back at full level"
 
 # 2. A second run reuses the stems.
 run "$TMP/exact.wav" > /dev/null
@@ -46,7 +50,7 @@ ok "second run reuses the stems"
 # 3. A track that would overshoot is scaled down as a whole, not clipped and then scaled.
 #    Mix 0.78, "bass" -0.52: mix minus bass peaks at 1.30 (+2.3 dB).
 synth "$TMP/loud.wav" '0.78*sin(2*PI*220*t)'
-log=$(FAKE_BASS='-0.52*sin(2*PI*220*t)' run "$TMP/loud.wav")
+log=$(FAKE_BASS='-0.26*sin(2*PI*220*t)' run "$TMP/loud.wav")
 gain=$(sed -n 's/.*no bass: turned down \([0-9.]*\) dB.*/\1/p' <<< "$log")
 [[ -n "$gain" ]] || fail "expected the no-bass track to be turned down"
 synth "$TMP/loud-expected.wav" "1.30*pow(10,-$gain/20)*sin(2*PI*220*t)"
@@ -55,6 +59,15 @@ below "$r" -70 || fail "loud track is not a scaled copy (residual $r dBFS)"
 p=$(astat "$OUT/loud/no bass.flac" Peak_level)
 LC_ALL=C awk -v p="$p" 'BEGIN { exit !(p < -0.05 && p > -0.3) }' || fail "peak $p dB"
 ok "overshooting track turned down $gain dB, peak $p dB, waveform intact (residual $r dBFS)"
+
+# 3b. A stem louder than full scale in the song (bass 1.2, mix 0.9) still subtracts out
+#     exactly, because Demucs only ever sees half of it.
+synth "$TMP/hot.wav" '0.9*sin(2*PI*220*t)'
+synth "$TMP/hot-expected.wav" '-0.3*sin(2*PI*220*t)'
+FAKE_BASS='4/3*val(ch)' run "$TMP/hot.wav" > /dev/null   # 1.2 at the song's level
+r=$(residual "$OUT/hot/no bass.flac" "$TMP/hot-expected.wav")
+below "$r" -80 || fail "a stem above full scale did not subtract out (residual $r dBFS)"
+ok "a bass stem above full scale still subtracts out (residual $r dBFS)"
 
 # 4. Demucs failing halfway leaves nothing behind that a later run would reuse.
 synth "$TMP/crash.wav" '0.2*sin(2*PI*80*t)'
@@ -82,7 +95,7 @@ ok "a different song under the same name needs --fresh"
 mkdir -p "$TMP/입력 폴더"
 synth "$TMP/입력 폴더/연습 곡 1.wav" '0.25*sin(2*PI*60*t)+0.25*sin(2*PI*700*t)' 3 48000 1
 synth "$TMP/mono-expected.wav" '0.25*sin(2*PI*700*t)'
-OUT="$TMP/출력 폴더" FAKE_BASS='0.25*sin(2*PI*60*t)' run "$TMP/입력 폴더/연습 곡 1.wav" > /dev/null
+OUT="$TMP/출력 폴더" FAKE_BASS='0.125*sin(2*PI*60*t)' run "$TMP/입력 폴더/연습 곡 1.wav" > /dev/null
 f="$TMP/출력 폴더/연습 곡 1/no bass.flac"
 [[ -f "$f" ]] || fail "no output for a path with spaces and Korean"
 info=$(ffprobe -v error -show_entries stream=sample_rate,channels -of csv=p=0 "$f")

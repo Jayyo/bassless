@@ -116,12 +116,21 @@ if [[ ! -f "$REF" ]]; then
   ffmpeg -loglevel error -y -i "$OUT/$ORIG.flac" -ar 44100 "${layout[@]}" -c:a pcm_s16le -f wav "$REF.part"
   mv -f "$REF.part" "$REF"
 fi
+# Demucs is handed the song 6 dB down. Its float32 writer clamps to +-1 whatever
+# --clip-mode says, and stems of a loud master go past that (drums at 1.13 on one
+# song). Demucs normalises its input level, so the stems come back at exactly half
+# scale (checked: within -75 dB) and are doubled when used.
+HALF="$WORK/demucs-input.wav"
+if [[ ! -f "$HALF" ]]; then
+  ffmpeg -loglevel error -y -i "$REF" -af "volume=0.5" -c:a pcm_f32le -f wav "$HALF.part"
+  mv -f "$HALF.part" "$HALF"
+fi
 
 # ---- separate (once per model; reused while the stems and settings match) -------
 declare -A NEED=()
 for s in "${STEMS[@]}"; do NEED[$(model_for "$s")]=1; done
 for m in "${!NEED[@]}"; do
-  settings="model=$m shifts=$SHIFTS float32 clip=none"
+  settings="model=$m shifts=$SHIFTS float32 clip=none input=half"
   complete=1
   for st in $(stems_of "$m"); do [[ -f "$WORK/$m/$st.wav" ]] || complete=0; done
   if (( complete )) && [[ "$(cat "$WORK/$m/settings" 2>/dev/null)" == "$settings" ]]; then
@@ -134,7 +143,7 @@ for m in "${!NEED[@]}"; do
   # subtract out of the original exactly.
   run=("$DEMUCS" -n "$m" --shifts "$SHIFTS" --float32 --clip-mode none -o "$tmp" --filename "{stem}.wav")
   [[ -n "$DEVICE" ]] && run+=(-d "$DEVICE")
-  if ! "${run[@]}" "$REF" > "$tmp/demucs.log" 2>&1; then
+  if ! "${run[@]}" "$HALF" > "$tmp/demucs.log" 2>&1; then
     tail -n 20 "$tmp/demucs.log" >&2
     rm -rf -- "$tmp"
     die "Demucs failed (last lines above)"
@@ -173,19 +182,20 @@ encode() {  # encode <out.flac> <filtergraph> <inputs...>: turned down only if i
   rm -f -- "$tmp"; mv -f "$out.part" "$out"
 }
 
-# Both files side by side as four channels, subtracted per channel. Float before pan,
-# or the difference is computed in 16-bit and clips inside the filter.
-MINUS="[0][1]amerge=inputs=2,aformat=sample_fmts=flt,pan=stereo|c0=c0-c2|c1=c1-c3"
+# Both files side by side as four channels, subtracted per channel (the stem doubled,
+# see above). Float before pan, or the difference is computed in 16-bit and clips.
+MINUS="[0][1]amerge=inputs=2,aformat=sample_fmts=flt,pan=stereo|c0=c0-2*c2|c1=c1-2*c3"
+DOUBLE="aformat=sample_fmts=flt,volume=2"
 for s in "${STEMS[@]}"; do
   STEM="$WORK/$(model_for "$s")/$s.wav"
   echo "[2] $(muted "$s") / $(only "$s")"
   encode "$OUT/$(muted "$s").flac" "$MINUS" "$REF" "$STEM"
-  encode "$OUT/$(only "$s").flac" "anull" "$STEM"
+  encode "$OUT/$(only "$s").flac" "$DOUBLE" "$STEM"
   if [[ -n "$SLOW" ]]; then
     SD="$OUT/$(slowdir "$SLOW")"; mkdir -p "$SD"
     # From the unattenuated signal, so the slow copy gets one gain of its own.
     encode "$SD/$(muted "$s").flac" "$MINUS,rubberband=tempo=$SLOW" "$REF" "$STEM"
-    encode "$SD/$(only "$s").flac" "rubberband=tempo=$SLOW" "$STEM"
+    encode "$SD/$(only "$s").flac" "$DOUBLE,rubberband=tempo=$SLOW" "$STEM"
   fi
 done
 
