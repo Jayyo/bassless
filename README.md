@@ -113,7 +113,7 @@ derived file is rendered once in float, its peak measured with ffmpeg's
 `astats`, and the file turned down just enough to peak at -0.1 dBFS (3.00 dB on
 예뻤어). The slowed copies need their own check: rubberband raised the peak
 again, and the 0.8x no-bass copy of 예뻤어 needed 4.94 dB. On the Aimyon song
-even the bass stem alone peaks at about 1.07, so the bass-only track was turned
+even the bass stem alone peaks at about 1.06, so the bass-only track was turned
 down 0.61 dB.
 `volumedetect` can't be used for the measurement: it converts to 16-bit first
 and reports 0 dB.
