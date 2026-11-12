@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# bassless - practice tracks with one instrument muted, from a song file.
+#
+# Usage: bassless <song file> [--stem bass,drums,...] [--name NAME] [--out DIR]
+#                 [--slow 0.8] [--shifts N] [--device cuda|cpu] [--ko]
+#   --stem    comma list of stems to mute (default: bass).
+#             bass | drums | vocals | other -> htdemucs_ft (4 stems, best quality)
+#             guitar | piano                -> htdemucs_6s (6 stems; those two are weaker)
+#   --name    output folder name (default: the song's file name)
+#   --out     parent folder (default: ~/Music/bassless)
+#   --slow R  also render every output at tempo R, pitch kept (needs ffmpeg with rubberband)
+#   --shifts  Demucs shift trick, more = slower and slightly cleaner (default 2)
+#   --device  cuda or cpu (default: whatever Demucs picks, the GPU if it sees one)
+#   --ko      Korean file names (원곡, 베이스 없음, 베이스만, 느리게)
+#
+# Output: <out>/<name>/
+#   original.flac, no <stem>.flac, <stem> only.flac, slow <R>x/, .stems/ (raw separation)
+# The muted track is the ORIGINAL minus the separated stem (phase-inverted and mixed),
+# not the other stems summed back together. See README for why and what it costs.
+set -euo pipefail
+
+DEMUCS=${DEMUCS:-demucs}          # or e.g. DEMUCS=~/.venvs/demucs/bin/demucs
+ROOT="$HOME/Music/bassless"
+SRC=""; NAME=""; STEMS_ARG="bass"; SLOW=""; SHIFTS=2; DEVICE=""; KO=0
+
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --stem)   STEMS_ARG="$2"; shift 2;;
+    --name)   NAME="$2"; shift 2;;
+    --out)    ROOT="$2"; shift 2;;
+    --slow)   SLOW="$2"; shift 2;;
+    --shifts) SHIFTS="$2"; shift 2;;
+    --device) DEVICE="$2"; shift 2;;
+    --ko)     KO=1; shift;;
+    -h|--help) usage; exit 0;;
+    -*) echo "unknown option: $1" >&2; exit 2;;
+    *) SRC="$1"; shift;;
+  esac
+done
+[[ -n "$SRC" ]] || { usage >&2; exit 2; }
+[[ -f "$SRC" ]] || { echo "file not found: $SRC" >&2; exit 1; }
+command -v ffmpeg >/dev/null || { echo "ffmpeg is not installed" >&2; exit 1; }
+
+declare -A EN=([bass]=bass [drums]=drums [vocals]=vocals [other]=other [guitar]=guitar [piano]=piano)
+declare -A KO_NAME=([bass]=베이스 [drums]=드럼 [vocals]=보컬 [other]=나머지 [guitar]=일렉기타 [piano]=피아노)
+model_for() { case "$1" in guitar|piano) echo htdemucs_6s;; *) echo htdemucs_ft;; esac; }
+if (( KO )); then
+  ORIG="원곡"; muted() { echo "${KO_NAME[$1]} 없음"; }; only() { echo "${KO_NAME[$1]}만"; }; slowdir() { echo "느리게 $1x"; }
+else
+  ORIG="original"; muted() { echo "no ${EN[$1]}"; }; only() { echo "${EN[$1]} only"; }; slowdir() { echo "slow $1x"; }
+fi
+
+IFS=',' read -ra STEMS <<< "$STEMS_ARG"
+for s in "${STEMS[@]}"; do
+  [[ -n "${EN[$s]:-}" ]] || { echo "unknown stem '$s' (bass|drums|vocals|other|guitar|piano)" >&2; exit 2; }
+done
+# Read the list first: with pipefail, `ffmpeg | grep -q` fails when grep exits early.
+if [[ -n "$SLOW" ]] && [[ "$(ffmpeg -hide_banner -filters 2>/dev/null)" != *rubberband* ]]; then
+  echo "--slow needs ffmpeg built with librubberband" >&2; exit 1
+fi
+
+[[ -n "$NAME" ]] || NAME="$(basename "${SRC%.*}")"
+OUT="$ROOT/$NAME"; WORK="$OUT/.stems"
+mkdir -p "$WORK"
+SONG="$OUT/$ORIG.flac"
+[[ -f "$SONG" ]] || ffmpeg -loglevel error -y -i "$SRC" -c:a flac "$SONG"
+
+# Demucs works at 44.1 kHz stereo. Subtracting needs the original at exactly that
+# rate and layout, sample-aligned with the stems, so separate this file, not $SRC.
+REF="$WORK/reference.wav"
+[[ -f "$REF" ]] || ffmpeg -loglevel error -y -i "$SONG" -ar 44100 -ac 2 -c:a pcm_s16le "$REF"
+
+declare -A NEED=()
+for s in "${STEMS[@]}"; do NEED[$(model_for "$s")]=1; done
+for m in "${!NEED[@]}"; do
+  if [[ -f "$WORK/$m/bass.wav" ]]; then
+    echo "[1] $m stems already there, reusing"
+    continue
+  fi
+  echo "[1] separating with $m (shifts=$SHIFTS)..."
+  run=("$DEMUCS" -n "$m" --shifts "$SHIFTS" -o "$WORK" --filename "{stem}.wav")
+  [[ -n "$DEVICE" ]] && run+=(-d "$DEVICE")   # Demucs itself defaults to the GPU when it sees one
+  "${run[@]}" "$REF" 2>&1 | grep -vE "seconds/s|bag of|stored in|Separating track" || true
+  [[ -f "$WORK/$m/bass.wav" ]] || { echo "Demucs did not write $WORK/$m (see its output above)" >&2; exit 1; }
+done
+
+for s in "${STEMS[@]}"; do
+  STEM="$WORK/$(model_for "$s")/$s.wav"
+  [[ -f "$STEM" ]] || { echo "stem missing: $STEM" >&2; exit 1; }
+  echo "[2] $(muted "$s") / $(only "$s")"
+  # original + (-stem); normalize=0 keeps amix from halving the levels
+  ffmpeg -loglevel error -y -i "$REF" -i "$STEM" \
+    -filter_complex "[1]aeval='-val(0)|-val(1)'[neg];[0][neg]amix=inputs=2:normalize=0" \
+    -c:a flac "$OUT/$(muted "$s").flac"
+  ffmpeg -loglevel error -y -i "$STEM" -c:a flac "$OUT/$(only "$s").flac"
+  if [[ -n "$SLOW" ]]; then
+    SD="$OUT/$(slowdir "$SLOW")"; mkdir -p "$SD"
+    for f in "$(muted "$s")" "$(only "$s")"; do
+      ffmpeg -loglevel error -y -i "$OUT/$f.flac" -filter:a "rubberband=tempo=$SLOW" -c:a flac "$SD/$f.flac"
+    done
+  fi
+done
+
+echo "done -> $OUT"
