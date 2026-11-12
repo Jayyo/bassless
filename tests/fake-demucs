@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Stand-in for the demucs command in tests. Writes float32 stems next to where
+# Demucs would: bass = $FAKE_BASS (an ffmpeg aeval expression, default half the
+# input), every other stem silent. Each call is appended to $FAKE_DEMUCS_LOG.
+# FAKE_DEMUCS_FAIL=1 writes bass.wav and then fails, like a crash halfway through.
+set -euo pipefail
+model=""; out=""; input=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -n) model=$2; shift 2;;
+    -o) out=$2; shift 2;;
+    --shifts|--filename|--clip-mode|-d) shift 2;;
+    --float32) shift;;
+    *) input=$1; shift;;
+  esac
+done
+echo "$model $input" >> "${FAKE_DEMUCS_LOG:-/dev/null}"
+dir="$out/$model"; mkdir -p "$dir"
+bass=${FAKE_BASS:-0.5*val(ch)}
+ffmpeg -loglevel error -y -i "$input" -af "aeval=exprs='$bass':channel_layout=stereo" -c:a pcm_f32le "$dir/bass.wav"
+[[ "${FAKE_DEMUCS_FAIL:-0}" == 1 ]] && { echo "CUDA out of memory (fake)" >&2; exit 1; }
+stems="drums vocals other"; [[ "$model" == htdemucs_6s ]] && stems="$stems guitar piano"
+for s in $stems; do
+  ffmpeg -loglevel error -y -i "$input" -af "aeval=exprs='0':channel_layout=stereo" -c:a pcm_f32le "$dir/$s.wav"
+done
