@@ -34,12 +34,16 @@ def band(x, sr, lo, hi):
 def compare(folder):
     stems_dir = os.path.join(folder, ".stems")
     ref, sr = sf.read(os.path.join(stems_dir, "reference.wav"), always_2d=True)
+    # bassless separates the song at half level (see the script); scale the stems back.
+    settings_file = os.path.join(stems_dir, "htdemucs_ft", "settings")
+    settings = open(settings_file).read() if os.path.exists(settings_file) else ""
+    scale = 2.0 if "input=half" in settings else 1.0
     stems = {}
     for name in ("bass", "drums", "vocals", "other"):
         data, rate = sf.read(os.path.join(stems_dir, "htdemucs_ft", f"{name}.wav"), always_2d=True)
         if rate != sr or data.shape[1] != ref.shape[1]:
             raise SystemExit(f"{name}.wav is {rate} Hz x {data.shape[1]}, reference is {sr} Hz x {ref.shape[1]}")
-        stems[name] = data
+        stems[name] = data * scale
     n = min(len(ref), *(len(s) for s in stems.values()))
     longest = max(len(ref), *(len(s) for s in stems.values()))
     if longest - n > 0:
