@@ -5,7 +5,8 @@
 "resum" adds the drums, vocals and other stems back together (what most
 separation tools hand you as the no-bass track); "subtract" is the original
 minus the bass stem (what bassless writes). Both are compared with the original
-per frequency band. Needs numpy, scipy and soundfile.
+per frequency band, before bassless applies its final peak attenuation.
+Needs numpy, scipy and soundfile.
 """
 
 import argparse
@@ -32,10 +33,17 @@ def band(x, sr, lo, hi):
 
 def compare(folder):
     stems_dir = os.path.join(folder, ".stems")
-    ref, sr = sf.read(os.path.join(stems_dir, "reference.wav"))
-    stems = {name: sf.read(os.path.join(stems_dir, "htdemucs_ft", f"{name}.wav"))[0]
-             for name in ("bass", "drums", "vocals", "other")}
+    ref, sr = sf.read(os.path.join(stems_dir, "reference.wav"), always_2d=True)
+    stems = {}
+    for name in ("bass", "drums", "vocals", "other"):
+        data, rate = sf.read(os.path.join(stems_dir, "htdemucs_ft", f"{name}.wav"), always_2d=True)
+        if rate != sr or data.shape[1] != ref.shape[1]:
+            raise SystemExit(f"{name}.wav is {rate} Hz x {data.shape[1]}, reference is {sr} Hz x {ref.shape[1]}")
+        stems[name] = data
     n = min(len(ref), *(len(s) for s in stems.values()))
+    longest = max(len(ref), *(len(s) for s in stems.values()))
+    if longest - n > 0:
+        print(f"  note: lengths differ by {longest - n} samples, compared the first {n}")
     ref = ref[:n]
     stems = {k: v[:n] for k, v in stems.items()}
     resum = stems["drums"] + stems["vocals"] + stems["other"]
