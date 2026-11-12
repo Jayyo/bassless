@@ -90,8 +90,16 @@ for s in "${STEMS[@]}"; do
   [[ -f "$STEM" ]] || { echo "stem missing: $STEM" >&2; exit 1; }
   echo "[2] $(muted "$s") / $(only "$s")"
   # original + (-stem); normalize=0 keeps amix from halving the levels
-  ffmpeg -loglevel error -y -i "$REF" -i "$STEM" \
-    -filter_complex "[1]aeval='-val(0)|-val(1)'[neg];[0][neg]amix=inputs=2:normalize=0" \
+  MIX="[1]aeval='-val(0)|-val(1)'[neg];[0][neg]amix=inputs=2:normalize=0"
+  # Taking a loud bass out of a loud master can push peaks past full scale (2.8 dB
+  # over on one song). Measure in float first and turn the track down if needed;
+  # volumedetect can't be used here, it converts to 16-bit before it measures.
+  PEAK=$(ffmpeg -hide_banner -nostats -i "$REF" -i "$STEM" \
+    -filter_complex "$MIX,astats=measure_perchannel=none:measure_overall=Peak_level" -f null - 2>&1 \
+    | sed -n 's/.*Peak level dB: \(-\{0,1\}[0-9.]*\).*/\1/p' | tail -1)
+  GAIN=$(awk -v p="${PEAK:-0}" 'BEGIN { printf "%.2f", (p > -0.1) ? -0.1 - p : 0 }')
+  [[ "$GAIN" == "0.00" ]] || echo "    turning it down ${GAIN#-} dB so it doesn't clip"
+  ffmpeg -loglevel error -y -i "$REF" -i "$STEM" -filter_complex "$MIX,volume=${GAIN}dB" \
     -c:a flac "$OUT/$(muted "$s").flac"
   ffmpeg -loglevel error -y -i "$STEM" -c:a flac "$OUT/$(only "$s").flac"
   if [[ -n "$SLOW" ]]; then
