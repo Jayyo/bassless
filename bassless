@@ -147,12 +147,11 @@ for m in "${!NEED[@]}"; do
 done
 
 # ---- write the tracks ---------------------------------------------------------------
-peak_db() {  # peak_db <filtergraph> <inputs...>: peak of the graph's output in dB, measured in float
-  local graph=$1 out v args=() f; shift
-  for f in "$@"; do args+=(-i "$f"); done
-  out=$(ffmpeg -hide_banner -nostats "${args[@]}" \
-    -filter_complex "$graph,aformat=sample_fmts=flt,astats=measure_perchannel=none:measure_overall=Peak_level" \
-    -f null - 2>&1) || die "ffmpeg failed while measuring a peak"
+peak_db() {  # peak_db <file>: peak in dB, measured in float
+  local out v
+  out=$(ffmpeg -hide_banner -nostats -i "$1" \
+    -af "aformat=sample_fmts=flt,astats=measure_perchannel=none:measure_overall=Peak_level" -f null - 2>&1) \
+    || die "ffmpeg failed while measuring a peak"
   v=$(sed -n 's/.*Peak level dB: \([^ ]*\).*/\1/p' <<< "$out" | tail -n 1)
   if [[ "$v" == "-inf" ]]; then echo "-inf"
   elif [[ "$v" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then echo "$v"
@@ -160,16 +159,18 @@ peak_db() {  # peak_db <filtergraph> <inputs...>: peak of the graph's output in 
   fi
 }
 encode() {  # encode <out.flac> <filtergraph> <inputs...>: turned down only if it would clip
-  local out=$1 graph=$2 peak gain args=() f; shift 2
-  # volumedetect can't be used for this: it converts to 16-bit first and reports 0 dB.
-  peak=$(peak_db "$graph" "$@")
+  local out=$1 graph=$2 peak gain args=() f tmp; shift 2
+  for f in "$@"; do args+=(-i "$f"); done
+  # Render once to float so the peak can go above full scale, then measure that file.
+  # (volumedetect can't be used for this: it converts to 16-bit first and reports 0 dB.)
+  tmp="$out.part.wav"
+  ffmpeg -loglevel error -y "${args[@]}" -filter_complex "$graph,aformat=sample_fmts=flt" -c:a pcm_f32le -f wav "$tmp"
+  peak=$(peak_db "$tmp")
   gain=0.00
   [[ "$peak" == "-inf" ]] || gain=$(LC_ALL=C awk -v p="$peak" 'BEGIN { printf "%.2f", (p > -0.1) ? -0.1 - p : 0 }')
   [[ "$gain" == "0.00" ]] || echo "    $(basename "$out" .flac): turned down ${gain#-} dB so it doesn't clip"
-  for f in "$@"; do args+=(-i "$f"); done
-  ffmpeg -loglevel error -y "${args[@]}" -filter_complex "$graph,aformat=sample_fmts=flt,volume=${gain}dB" \
-    -sample_fmt s16 -c:a flac -f flac "$out.part"
-  mv -f "$out.part" "$out"
+  ffmpeg -loglevel error -y -i "$tmp" -af "volume=${gain}dB" -sample_fmt s16 -c:a flac -f flac "$out.part"
+  rm -f -- "$tmp"; mv -f "$out.part" "$out"
 }
 
 # Both files side by side as four channels, subtracted per channel. Float before pan,
