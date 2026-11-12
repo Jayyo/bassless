@@ -15,7 +15,7 @@
 #
 # Output: <out>/<name>/
 #   original.flac, no <stem>.flac, <stem> only.flac, slow <R>x/, .stems/ (raw separation)
-# The muted track is the ORIGINAL minus the separated stem (phase-inverted and mixed),
+# The muted track is the ORIGINAL minus the separated stem, sample by sample,
 # not the other stems summed back together. See README for why and what it costs.
 set -euo pipefail
 
@@ -89,8 +89,10 @@ for s in "${STEMS[@]}"; do
   STEM="$WORK/$(model_for "$s")/$s.wav"
   [[ -f "$STEM" ]] || { echo "stem missing: $STEM" >&2; exit 1; }
   echo "[2] $(muted "$s") / $(only "$s")"
-  # original + (-stem); normalize=0 keeps amix from halving the levels
-  MIX="[1]aeval='-val(0)|-val(1)'[neg];[0][neg]amix=inputs=2:normalize=0"
+  # Put both files side by side as four channels and subtract per channel. amix
+  # also works, but it can slip a sample when the two inputs differ in format.
+  # Float before pan, or the difference is computed in 16-bit and clips right there.
+  MIX="[0][1]amerge=inputs=2,aformat=sample_fmts=flt,pan=stereo|c0=c0-c2|c1=c1-c3"
   # Taking a loud bass out of a loud master can push peaks past full scale (2.8 dB
   # over on one song). Measure in float first and turn the track down if needed;
   # volumedetect can't be used here, it converts to 16-bit before it measures.
