@@ -15,7 +15,8 @@ and anything else that ended up in the bass stem is subtracted too.
 The no-bass track is essentially what `demucs --two-stems bass --other-method minus`
 (Demucs 4.1) writes. What the script adds is the practice side: a bass-only
 track, slowed copies with the pitch kept, Korean file names if you want them,
-stems that are kept and reused, and a peak check on every file it writes.
+stems that are kept and reused, and a peak check on every file it derives
+(`original.flac` is a straight copy of your file and isn't touched).
 
 ## Use
 
@@ -42,9 +43,11 @@ over. `--stem` takes `bass`, `drums`, `vocals` and `other` (the 4-stem
 own README says its piano stem is weak).
 
 The stems are kept as 32-bit float WAV; with the 4-stem model `.stems` takes
-about 115 MB per minute of audio. bassless remembers the SHA-256 of the file it separated, so
-a different song under the same name stops with an error instead of reusing
-the old stems. The first Demucs run downloads the model weights.
+about 115 MB per minute of audio. bassless remembers the SHA-256 of the file it
+separated, so a different song under the same name stops with an error instead
+of reusing the old stems; `--fresh` won't run if the song itself is inside the
+output folder, and two runs on one folder at the same time are refused. The
+first Demucs run downloads the model weights.
 
 ## Install
 
@@ -69,42 +72,49 @@ that row, which is why the bass-range row is there.
 | | DAY6 - 예뻤어 | | Aimyon - 愛を伝えたいだとか | |
 |---|---:|---:|---:|---:|
 | | re-summed | subtracted | re-summed | subtracted |
-| difference from original, 300 Hz-4 kHz | -24.0 dB | -35.2 dB | -13.6 dB | -16.7 dB |
-| difference from original, 1-8 kHz | -25.0 dB | -41.6 dB | -21.6 dB | -28.8 dB |
-| level change, 40-250 Hz | -2.40 dB | -2.43 dB | -3.09 dB | -2.99 dB |
+| difference from original, 300 Hz-4 kHz | -23.7 dB | -35.1 dB | -13.5 dB | -16.5 dB |
+| difference from original, 1-8 kHz | -24.5 dB | -41.5 dB | -21.8 dB | -28.6 dB |
+| level change, 40-250 Hz | -2.40 dB | -2.43 dB | -3.09 dB | -2.98 dB |
 
 Both take about the same out of the bass range. Above it, the subtracted track
-stays closer to the original: by 11.2 and 16.6 dB on 예뻤어, by 3.1 and 7.2 dB
+stays closer to the original: by 11.4 and 17.0 dB on 예뻤어, by 3.0 and 6.8 dB
 on the Aimyon song. Two songs and one model, measured, not a listening test. The
 40-250 Hz row also holds kick drum and the low end of other instruments, so it
 doesn't say how much bass is left.
 
 Part of what I heard in my first version came from the files, not the method.
 Demucs saves 16-bit stems by default and rescales any stem that would clip,
-each by its own factor, so saved stems no longer add up. Three of the four
+each by its own factor, which adds error on top of the model's own when the
+stems are summed. Three of the four
 16-bit stems of 예뻤어 and all four of the Aimyon song peaked at exactly 0.990
 (1/1.01, the mark of that rescaling). Summed back, the 16-bit stems of 예뻤어
 were off from the original by -14.8 dB and came out 1.7 dB quieter in the vocal
-range; separated again and kept as float, they are off by -23.8 dB. If you
+range; separated again and kept as float, they are off by -23.6 dB. If you
 re-sum stems yourself, save them as float.
 
 Float isn't enough on its own: Demucs 4.1's float32 writer clamps to +-1
 whatever `--clip-mode` says, and on the Aimyon song that cut 287 drum samples.
 bassless hands Demucs the song 6 dB down instead and doubles the stems when it
-uses them. Demucs normalises its input level, so this is exact in practice: on
-the Aimyon song the doubled stems matched a full-level run within -75 dB
-(shifts 0), and the drums came out peaking at 1.13 instead of being cut at 1.
+uses them. Demucs normalises its input level, so the stems come back at half
+scale: on the Aimyon song, with shifts 0, the doubled stems differed from a
+full-level run by about -75 dB where that run wasn't clamped, and the drums came
+out peaking at 1.13 instead of being cut at 1. A stem that would peak above 2 in
+the song is still cut; bassless prints a warning when a stem reaches full
+scale at half level. The two songs were 48 kHz, 24-bit and peaked at exactly
+0 dBFS; resampled to 44.1 kHz they peak at 1.10 and 1.05, so the reference
+bassless subtracts from is kept as float too.
 
 ## Clipping
 
-Taking a loud bass out of a loud master pushes the peaks past full scale: 1.39
-and 1.35 times full scale on the two songs above. My first version wrote that
+Taking a loud bass out of a loud master pushes the peaks past full scale:
+about 1.4 times full scale on both songs above. My first version wrote that
 straight to 16-bit FLAC and clipped about 50,000 samples of 예뻤어. Now every
-file is rendered once in float, its peak measured with ffmpeg's `astats`, and
-the file turned down just enough to peak at -0.1 dBFS (2.95 dB on 예뻤어).
-The slowed copies need their own check: rubberband raised the peak again, and
-the 0.8x no-bass copy of 예뻤어 needed 5.10 dB. On the Aimyon song even the bass
-stem alone peaks at about 1.03, so the bass-only track was turned down 0.34 dB.
+derived file is rendered once in float, its peak measured with ffmpeg's
+`astats`, and the file turned down just enough to peak at -0.1 dBFS (3.00 dB on
+예뻤어). The slowed copies need their own check: rubberband raised the peak
+again, and the 0.8x no-bass copy of 예뻤어 needed 4.94 dB. On the Aimyon song
+even the bass stem alone peaks at about 1.07, so the bass-only track was turned
+down 0.61 dB.
 `volumedetect` can't be used for the measurement: it converts to 16-bit first
 and reports 0 dB.
 
@@ -115,10 +125,10 @@ RTX 3090, the 4:43 예뻤어:
 | | time |
 |---|---:|
 | Demucs alone, shifts 2, float32 | 49.7 s, 49.8 s |
-| first run, `--slow 0.8` | 75.3 s |
-| first run, `--shifts 0` | 33.3 s |
-| stems already there | 3.9 s |
-| stems already there, `--slow 0.8` | 24.1 s |
+| first run, `--slow 0.8` | 78.4 s |
+| first run, `--shifts 0` | 36.6 s |
+| stems already there | 4.1 s |
+| stems already there, `--slow 0.8` | 24.7 s |
 
 The models were already downloaded. I haven't timed it on a CPU.
 
@@ -130,12 +140,16 @@ tests/run.sh
 
 They need ffmpeg but not Demucs: `tests/fake-demucs` stands in for it and
 writes known stems. They check that a 55 Hz + 1 kHz mix comes back as the
-1 kHz tone (residual around -92 dBFS) and the bass-only track at the song's
+1 kHz tone (residual around -130 dBFS) and the bass-only track at the song's
 level, that a track that would overshoot is scaled down as a whole rather
 than clipped, that a stem louder than full scale still subtracts out (the fake
-clamps at +-1 like Demucs does), that a Demucs crash leaves no stems behind, that incomplete or mismatched stems are separated again, mono
-48 kHz input in a path with spaces and Korean, several stems with `--slow` and
-`--ko`, silence, and bad arguments.
+clamps at +-1 like Demucs does), that a Demucs crash leaves no stems behind,
+that incomplete, mismatched or differently-set-up stems are separated again,
+the 6-stem path, the clamp warning, `--fresh` with the song inside the output
+folder, the folder lock, mono 48 kHz input in a path with spaces and Korean,
+several stems with `--slow` and `--ko`, silence, and bad arguments. Real
+Demucs on 3 s of silence writes silent stems (no NaN), which the fake can't
+show.
 
 ## Related
 
