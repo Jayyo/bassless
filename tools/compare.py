@@ -33,6 +33,9 @@ def band(x, sr, lo, hi):
 
 def compare(folder):
     stems_dir = os.path.join(folder, ".stems")
+    if not os.path.isdir(os.path.join(stems_dir, "htdemucs_ft")):
+        print(f"\n{folder}: no htdemucs_ft stems (run bassless with a bass, drums, vocals or other stem first)")
+        return
     ref, sr = sf.read(os.path.join(stems_dir, "reference.wav"), always_2d=True)
     # bassless separates the song at half level (see the script); scale the stems back.
     settings_file = os.path.join(stems_dir, "htdemucs_ft", "settings")
@@ -54,13 +57,23 @@ def compare(folder):
     subtract = ref - stems["bass"]
 
     print(f"\n{os.path.basename(os.path.normpath(folder))} ({n / sr:.0f} s)")
+    if power(ref) == 0:
+        print("  the original is silent, nothing to compare")
+        return
     print(f"  four stems summed vs original: off by {db(power(ref - sum(stems.values())) / power(ref)):+.1f} dB")
     print(f"  peak of the subtracted track: {np.abs(subtract).max():.3f} (original {np.abs(ref).max():.3f})")
     print(f"  {'band':14s} {'level change':>22s}   {'difference from original':>26s}")
     print(f"  {'':14s} {'resum':>10s} {'subtract':>11s}   {'resum':>12s} {'subtract':>13s}")
     for lo, hi, label in BANDS:
-        o, r, s = band(ref, sr, lo, hi), band(resum, sr, lo, hi), band(subtract, sr, lo, hi)
+        try:
+            o, r, s = band(ref, sr, lo, hi), band(resum, sr, lo, hi), band(subtract, sr, lo, hi)
+        except ValueError:  # sosfiltfilt needs a minimum length
+            print(f"  {label:14s} too short to filter")
+            continue
         po = power(o)
+        if po == 0:
+            print(f"  {label:14s} nothing in this band in the original")
+            continue
         print(f"  {label:14s} {db(power(r) / po):+9.2f}  {db(power(s) / po):+10.2f}   "
               f"{db(power(o - r) / po):+11.1f}  {db(power(o - s) / po):+12.1f}  dB")
 
